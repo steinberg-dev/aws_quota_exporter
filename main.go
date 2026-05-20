@@ -124,22 +124,22 @@ func main() {
 		cacheDuration   = flag.Duration("cache.duration", 300*time.Second, "Cache expiry time.")
 		cacheServeStale = flag.Bool("cache.serve-stale", false, "Serve stale cache data during cache refresh. This avoids delays in serving metrics. (default: false)")
 		collectUsage    = flag.Bool("collect.usage", false, "Collect quotas usage where available (NOTE: CloudWatch calls aren't free, default: false)")
-		onlyWithUsage   = flag.Bool("collect.only-with-usage", false, "Collect only quotas that have usage metrics defined. Implicitly enables -collect.usage.false)")
+		onlyWithUsage   = flag.Bool("collect.only-with-usage", false, "Collect only quotas that have usage metrics defined. Implicitly enables -collect.usage. (default: false)")
 		Version         = flag.Bool("version", false, "Display aqe version")
 	)
 	flag.Parse()
 
 	if *Version {
-                printVersion()
-                os.Exit(0)
-        }
+		printVersion()
+		os.Exit(0)
+	}
 
-        // --collect.only-with-usage implicitly enables usage collection
-        if *onlyWithUsage {
-                *collectUsage = true
-        }
+	// --collect.only-with-usage implicitly enables usage collection
+	if *onlyWithUsage {
+		*collectUsage = true
+	}
 
-        // create logger
+	// create logger
 	logger := pkg.NewLogger(*logFormatType, *logFolder, *logLevel).With("version", version)
 	slog.SetDefault(logger)
 	start := time.Now()
