@@ -71,7 +71,7 @@ func NewScraper() (*Scraper, error) {
 }
 
 // CreateScraper Scrape Quotas from AWS
-func (s *Scraper) CreateScraper(job JobConfig, cacheDuration *time.Duration, cacheServeStale bool, collectUsage bool) func() ([]*PrometheusMetric, error) {
+func (s *Scraper) CreateScraper(job JobConfig, cacheDuration *time.Duration, cacheServeStale bool, collectUsage bool, onlyWithUsage bool) func() ([]*PrometheusMetric, error) {
 
 	cfg := s.getAWSConfig(job.Role)
 	AccountID := getAWSAccountID(cfg)
@@ -102,7 +102,7 @@ func (s *Scraper) CreateScraper(job JobConfig, cacheDuration *time.Duration, cac
 					l.Info("Serving stale cache data")
 
 					if !cacheStore.ServeStale {
-						go s.scrapeServiceMetrics(l, job, AccountID, collectUsage, cacheStore)
+						go s.scrapeServiceMetrics(l, job, AccountID, collectUsage, onlyWithUsage, cacheStore)
 						cacheStore.ServeStale = true
 					}
 					return cacheData, nil
@@ -113,13 +113,13 @@ func (s *Scraper) CreateScraper(job JobConfig, cacheDuration *time.Duration, cac
 			}
 		}
 
-		return s.scrapeServiceMetrics(l, job, AccountID, collectUsage, cacheStore)
+		return s.scrapeServiceMetrics(l, job, AccountID, collectUsage, onlyWithUsage, cacheStore)
 
 	}
 
 }
 
-func (s *Scraper) scrapeServiceMetrics(l *slog.Logger, job JobConfig, AccountID string, collectUsage bool, cacheStore *Cache) ([]*PrometheusMetric, error) {
+func (s *Scraper) scrapeServiceMetrics(l *slog.Logger, job JobConfig, AccountID string, collectUsage bool, onlyWithUsage bool, cacheStore *Cache) ([]*PrometheusMetric, error) {
 	start := time.Now()
 	l.Info("Scrapping metrics")
 
@@ -137,7 +137,7 @@ func (s *Scraper) scrapeServiceMetrics(l *slog.Logger, job JobConfig, AccountID 
 			AccountName: job.AccountName,
 			AccountID:   AccountID,
 		}
-		go getServiceQuotas(ctx, collectUsage, jobRegionCfg, &input, sqclient, cwclient, c)
+		go getServiceQuotas(ctx, collectUsage, onlyWithUsage, jobRegionCfg, &input, sqclient, cwclient, c)
 	}
 	// retrieve channel results from goroutines
 	for i := 0; i < len(job.Regions); i++ {
@@ -277,7 +277,7 @@ func createDescription(serviceName, quotaName string) string {
 	return fmt.Sprintf("%s: %s", serviceName, quotaName)
 }
 
-func getServiceQuotas(ctx context.Context, collectUsage bool, jobRegionCfg JobRegion, sqInput *sq.ListServiceQuotasInput, sqclient *sq.Client, cwclient CloudWatchClient, c chan chanData) {
+func getServiceQuotas(ctx context.Context, collectUsage bool, onlyWithUsage bool, jobRegionCfg JobRegion, sqInput *sq.ListServiceQuotasInput, sqclient *sq.Client, cwclient CloudWatchClient, c chan chanData) {
 	sqOpts := func(o *sq.Options) { o.Region = jobRegionCfg.Region }
 	asqInput := &sq.ListAWSDefaultServiceQuotasInput{ServiceCode: sqInput.ServiceCode, MaxResults: &maxResults}
 	var wg sync.WaitGroup
@@ -312,8 +312,39 @@ func getServiceQuotas(ctx context.Context, collectUsage bool, jobRegionCfg JobRe
 		}
 	}
 
-	// merge applied Quotas with defaults
-	quotasMerged := append(r.Quotas, d.Quotas...)
+	// Merge applied quotas with defaults, deduplicating by QuotaCode.
+	// Applied quotas take precedence over defaults.
+	seen := make(map[string]bool, len(r.Quotas))
+	quotasMerged := make([]sqTypes.ServiceQuota, 0, len(r.Quotas)+len(d.Quotas))
+	for _, q := range r.Quotas {
+		if q.QuotaCode != nil {
+			seen[*q.QuotaCode] = true
+		}
+		quotasMerged = append(quotasMerged, q)
+	}
+	for _, q := range d.Quotas {
+		if q.QuotaCode != nil && seen[*q.QuotaCode] {
+			continue // skip defaults that have an applied override
+		}
+		quotasMerged = append(quotasMerged, q)
+	}
+
+	// Filter to only quotas with usage metrics defined
+	if onlyWithUsage {
+		filtered := make([]sqTypes.ServiceQuota, 0, len(quotasMerged))
+		for _, q := range quotasMerged {
+			if q.UsageMetric != nil {
+				filtered = append(filtered, q)
+			}
+		}
+		slog.Debug("Filtered quotas to only-with-usage",
+			"before", len(quotasMerged),
+			"after", len(filtered),
+			"region", jobRegionCfg.Region,
+		)
+		quotasMerged = filtered
+	}
+
 	if collectUsage { // Collect quota usage if enabled
 		quotasUsage = getQuotasUsage(ctx, quotasMerged, cwclient, jobRegionCfg.Region)
 	} else { // Otherwise just create quotasUsage struct from quotasMerged
@@ -404,17 +435,22 @@ func getQuotasUsage(ctx context.Context, quotas []sqTypes.ServiceQuota, cwclient
 					case "Average":
 						mq.Usage = *resp.Datapoints[0].Average
 					case "Sum":
-						var periodSeconds float64
-						periodValue := float64(*q.Period.PeriodValue)
-						switch q.Period.PeriodUnit { // convert PeriodUnit to seconds
-						case sqTypes.PeriodUnitSecond:
-							periodSeconds = 1
-						case sqTypes.PeriodUnitMinute:
-							periodSeconds = 60
-						default:
-							slog.Warn("Unable to convert PeriodUnit to seconds", "QuotaCode", *q.QuotaCode, "PeriodUnit", q.Period.PeriodUnit)
+						if q.Period == nil || q.Period.PeriodValue == nil {
+							slog.Warn("Quota has Sum statistic but no Period defined, falling back to raw Sum", "QuotaCode", *q.QuotaCode)
+							mq.Usage = *resp.Datapoints[0].Sum
+						} else {
+							var periodSeconds float64
+							periodValue := float64(*q.Period.PeriodValue)
+							switch q.Period.PeriodUnit { // convert PeriodUnit to seconds
+							case sqTypes.PeriodUnitSecond:
+								periodSeconds = 1
+							case sqTypes.PeriodUnitMinute:
+								periodSeconds = 60
+							default:
+								slog.Warn("Unable to convert PeriodUnit to seconds", "QuotaCode", *q.QuotaCode, "PeriodUnit", q.Period.PeriodUnit)
+							}
+							mq.Usage = (*resp.Datapoints[0].Sum * periodSeconds * periodValue) / float64(cloudwatchTimePeriod*60) // Sum is calculated over cloudwatchTimePeriod interval
 						}
-						mq.Usage = (*resp.Datapoints[0].Sum * periodSeconds * periodValue) / float64(cloudwatchTimePeriod*60) // Sum is calculated over cloudwatchTimePeriod interval
 					case "SampleCount":
 						mq.Usage = *resp.Datapoints[0].SampleCount
 					}
