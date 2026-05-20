@@ -46,6 +46,8 @@ Usage of ./aws_quota_exporter:
         Cache expiry time. (default 5m0s)
   -cache.serve-stale
         Serve stale cache data during cache refresh. This avoids delays in serving metrics. (default: false)
+  -collect.only-with-usage
+        Collect only quotas that have usage metrics defined. Implicitly enables -collect.usage. (default: false)
   -collect.usage
         Collect quotas usage where available (NOTE: CloudWatch calls aren't free, default: false)
   -config.file string
@@ -91,6 +93,15 @@ Example promQL query to get quota usage ratio:
 `
 
 NOTE: It requires `cloudwatch:GetMetricStatistics` permission in IAM policy.
+
+### Only collect quotas with usage
+For services with a large number of quotas (e.g., EC2 with ~1.7k quotas per account/region), you can use the `-collect.only-with-usage` flag to collect only quotas that have usage metrics defined. This significantly reduces the number of metrics collected and the scrape time.
+
+```bash
+./aws_quota_exporter --collect.only-with-usage --config.file=config.yml
+```
+
+This flag implicitly enables `-collect.usage`. For example, with EC2 service quotas, this typically reduces the number of collected metrics from ~1.7k to ~30 per account/region.
 
 ## Docker Image Usage
 Using the docker image avaliable on [dockerhub](https://hub.docker.com/r/ugwuanyi/aqe)
