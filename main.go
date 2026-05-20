@@ -124,15 +124,22 @@ func main() {
 		cacheDuration   = flag.Duration("cache.duration", 300*time.Second, "Cache expiry time.")
 		cacheServeStale = flag.Bool("cache.serve-stale", false, "Serve stale cache data during cache refresh. This avoids delays in serving metrics. (default: false)")
 		collectUsage    = flag.Bool("collect.usage", false, "Collect quotas usage where available (NOTE: CloudWatch calls aren't free, default: false)")
+		onlyWithUsage   = flag.Bool("collect.only-with-usage", false, "Collect only quotas that have usage metrics defined. Implicitly enables -collect.usage.false)")
 		Version         = flag.Bool("version", false, "Display aqe version")
 	)
 	flag.Parse()
 
 	if *Version {
-		printVersion()
-		os.Exit(0)
-	}
-	// create logger
+                printVersion()
+                os.Exit(0)
+        }
+
+        // --collect.only-with-usage implicitly enables usage collection
+        if *onlyWithUsage {
+                *collectUsage = true
+        }
+
+        // create logger
 	logger := pkg.NewLogger(*logFormatType, *logFolder, *logLevel).With("version", version)
 	slog.SetDefault(logger)
 	start := time.Now()
@@ -157,7 +164,7 @@ func main() {
 	slog.Info("Registering scrappers")
 	for _, job := range qcl.Jobs {
 
-		pc := pkg.NewPrometheusCollector(s.CreateScraper(job, cacheDuration, *cacheServeStale, *collectUsage))
+		pc := pkg.NewPrometheusCollector(s.CreateScraper(job, cacheDuration, *cacheServeStale, *collectUsage, *onlyWithUsage))
 		err = reg.Register(pc)
 		if err != nil {
 			slog.Error("Failed to register metrics: "+err.Error(), "serviceCode", job.ServiceCode, "regions", job.Regions, "role", job.Role)
