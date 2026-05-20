@@ -72,6 +72,7 @@ func TestScraper_CreateScraper(t *testing.T) {
 		job                 JobConfig
 		cacheExpiryDuration time.Duration
 		collectUsage        bool
+		onlyWithUsage       bool
 		serveStale          bool
 	}
 	cfg, _ := config.LoadDefaultConfig(context.TODO())
@@ -104,7 +105,7 @@ func TestScraper_CreateScraper(t *testing.T) {
 				cfg: tt.fields.cfg,
 			}
 
-			got := s.CreateScraper(tt.args.job, &tt.args.cacheExpiryDuration, tt.args.serveStale, tt.args.collectUsage)
+			got := s.CreateScraper(tt.args.job, &tt.args.cacheExpiryDuration, tt.args.serveStale, tt.args.collectUsage, tt.args.onlyWithUsage)
 			d, derr := got()
 			r, terr := tt.want()
 			if (derr != nil) != tt.wantErr {
